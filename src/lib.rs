@@ -62,6 +62,8 @@
 //!
 //! * Initial release.
 
+use std::{fmt, ops};
+
 /// Return just the bits representing the type of file.
 fn type_bits(mode: u32) -> u32 {
     (mode >> 12) & 0o17
@@ -230,6 +232,125 @@ pub fn is_sticky(mode: u32) -> bool {
     mode & 0o1000 != 0
 }
 
+/// Wrapper that implements Display and prints as "-rwxrwxrwx"
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct Mode {
+    value: u32,
+}
+
+impl fmt::Debug for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl From<u32> for Mode {
+    fn from(value: u32) -> Self {
+        Self { value }
+    }
+}
+
+impl From<Mode> for u32 {
+    fn from(mode: Mode) -> Self {
+        mode.value
+    }
+}
+
+impl From<&Mode> for u32 {
+    fn from(mode: &Mode) -> Self {
+        mode.value
+    }
+}
+
+impl ops::BitAnd for Mode {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self {
+            value: self.value & other.value,
+        }
+    }
+}
+
+impl ops::BitAndAssign for Mode {
+    fn bitand_assign(&mut self, other: Self) {
+        self.value &= other.value;
+    }
+}
+
+impl ops::BitOr for Mode {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self {
+            value: self.value | other.value,
+        }
+    }
+}
+
+impl ops::BitOrAssign for Mode {
+    fn bitor_assign(&mut self, other: Self) {
+        self.value |= other.value;
+    }
+}
+
+impl ops::Not for Mode {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        Self { value: !self.value }
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This is decoded "by hand" here so that it'll work
+        // on non-Unix platforms.
+        use Access::*;
+        use Accessor::*;
+        use Type::*;
+
+        let mode = self.value;
+        let setuid = is_setuid(mode);
+        let setgid = is_setgid(mode);
+        let sticky = is_sticky(mode);
+
+        write!(
+            f,
+            "{}",
+            match Type::from(mode) {
+                Fifo => 'p',
+                CharDevice => 'c',
+                Dir => 'd',
+                BlockDevice => 'b',
+                File => '-',
+                Symlink => 'l',
+                Socket => 's',
+                Whiteout => 'w',
+                Unknown => '?',
+            }
+        )?;
+        for accessor in [User, Group, Other] {
+            for access in [Read, Write, Execute] {
+                write!(
+                    f,
+                    "{}",
+                    match (access, accessor, is_allowed(accessor, access, mode)) {
+                        (Execute, User, true) if setuid => 's',
+                        (Execute, User, false) if setuid => 'S',
+                        (Execute, Group, true) if setgid => 's',
+                        (Execute, Group, false) if setgid => 'S',
+                        (Execute, Other, true) if sticky => 't',
+                        (Execute, Other, false) if sticky => 'T',
+                        (Execute, _, true) => 'x',
+                        (Write, _, true) => 'w',
+                        (Read, _, true) => 'r',
+                        (_, _, false) => '-',
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Convert Unix mode bits to a text string describing type and permissions,
 /// as shown in `ls`.
 ///
@@ -250,47 +371,7 @@ pub fn is_sticky(mode: u32) -> bool {
 ///
 /// ```
 pub fn to_string(mode: u32) -> String {
-    // This is decoded "by hand" here so that it'll work
-    // on non-Unix platforms.
-    use Access::*;
-    use Accessor::*;
-    use Type::*;
-
-    let setuid = is_setuid(mode);
-    let setgid = is_setgid(mode);
-    let sticky = is_sticky(mode);
-
-    let mut s = String::with_capacity(10);
-    s.push(match Type::from(mode) {
-        Fifo => 'p',
-        CharDevice => 'c',
-        Dir => 'd',
-        BlockDevice => 'b',
-        File => '-',
-        Symlink => 'l',
-        Socket => 's',
-        Whiteout => 'w',
-        Unknown => '?',
-    });
-    for accessor in [User, Group, Other] {
-        for access in [Read, Write, Execute] {
-            s.push(
-                match (access, accessor, is_allowed(accessor, access, mode)) {
-                    (Execute, User, true) if setuid => 's',
-                    (Execute, User, false) if setuid => 'S',
-                    (Execute, Group, true) if setgid => 's',
-                    (Execute, Group, false) if setgid => 'S',
-                    (Execute, Other, true) if sticky => 't',
-                    (Execute, Other, false) if sticky => 'T',
-                    (Execute, _, true) => 'x',
-                    (Write, _, true) => 'w',
-                    (Read, _, true) => 'r',
-                    (_, _, false) => '-',
-                },
-            );
-        }
-    }
-    s
+    Mode::from(mode).to_string()
 }
 
 #[cfg(unix)]
@@ -373,7 +454,7 @@ mod unix_tests {
             std::fs::set_permissions(tmp_dir.path(), Permissions::from_mode(0o700)).unwrap();
             let f = &tmp_dir.path().join("f");
             std::fs::write(f, &[0]).unwrap();
-            std::fs::set_permissions(f, Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(f, Permissions::from_mode(0o0)).unwrap();
             let chmod = Command::new("chmod").arg(chmod_to).arg(f).output().unwrap();
             println!("chmod {:#?}", chmod);
             assert_eq!(to_string(file_mode(f)), expect_mode);
